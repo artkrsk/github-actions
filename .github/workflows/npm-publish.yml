@@ -11,7 +11,7 @@ on:
         type: boolean
         default: true
       pnpm-version:
-        description: pnpm version for callers without a packageManager field (e.g. "latest"); empty reads packageManager
+        description: pnpm version (e.g. "latest"); empty uses the caller's packageManager field, or latest when it has none
         type: string
         default: ""
     outputs:
@@ -30,6 +30,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
       created: ${{ steps.check.outputs.created }}
+      published: ${{ steps.registry.outputs.published }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -48,19 +49,44 @@ jobs:
             echo "Created tag $VERSION"
             echo "created=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Check npm for this version
+        id: registry
+        if: inputs.publish
+        run: |
+          SPEC="$(jq -r '.name + "@" + .version' package.json)"
+          if [ -n "$(npm view "$SPEC" version 2>/dev/null)" ]; then
+            echo "$SPEC is already on npm"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$SPEC is not on npm yet"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
 
   publish:
     needs: tag
-    if: inputs.publish && needs.tag.outputs.created == 'true'
+    # Gated on the registry, not on "tag was just created": a run that failed after tagging
+    # can be re-run and still publish.
+    if: inputs.publish && needs.tag.outputs.published != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v6
+      - name: Resolve pnpm version
+        id: pnpm
+        env:
+          REQUESTED: ${{ inputs.pnpm-version }}
+        # action-setup fails when `version` disagrees with a packageManager pin, so latest is
+        # only the fallback for a caller that has neither.
+        run: |
+          if [ -z "$REQUESTED" ] && ! jq -e '.packageManager' package.json >/dev/null; then
+            REQUESTED=latest
+          fi
+          echo "version=$REQUESTED" >> "$GITHUB_OUTPUT"
       - uses: pnpm/action-setup@v5
         with:
-          version: ${{ inputs.pnpm-version }}
+          version: ${{ steps.pnpm.outputs.version }}
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node-version }}
